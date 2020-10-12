@@ -78,9 +78,9 @@ func main() {
     })
     p.Mount(e)
 
-    ctx := context.Background()
-    p.Start(ctx, echo.New(), ":1323")
-    // To stop: ctx.Done() <- nil
+    pe := echo.New()
+    go p.Start(pe, ":1323")
+    // To stop: pe.Shutdown()
 
     e.Start()
 }

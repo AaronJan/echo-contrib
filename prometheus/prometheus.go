@@ -22,7 +22,6 @@ package prometheus
 
 import (
 	"bytes"
-	"context"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -351,16 +350,9 @@ func (p *Prometheus) Embed(e *echo.Echo) {
 }
 
 // Start start Prometheus in a separate Echo instance, which can be shutdowned with the Context parameter
-func (p *Prometheus) Start(ctx context.Context, e *echo.Echo, listenAddress string) {
-	go func() {
-		p.SetRoute(e)
-		e.Start(listenAddress)
-	}()
-
-	select {
-	case <-ctx.Done():
-		e.Shutdown(context.Background())
-	}
+func (p *Prometheus) Start(e *echo.Echo, listenAddress string) {
+	p.SetRoute(e)
+	e.Start(listenAddress)
 }
 
 // HandlerFunc defines handler function for middleware
