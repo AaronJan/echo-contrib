@@ -11,8 +11,8 @@ import (
 func main() {
     e := echo.New()
     // Enable metrics middleware
-    p := prometheus.NewPrometheus("echo", nil)
-    p.Use(e)
+    p := prometheus.NewPrometheus("echo")
+    p.Embed(e)
 
     e.Logger.Fatal(e.Start(":1323"))
 }
