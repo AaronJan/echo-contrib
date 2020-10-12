@@ -22,6 +22,7 @@ package prometheus
 
 import (
 	"bytes"
+	"context"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -113,18 +114,17 @@ type Prometheus struct {
 	reqCnt               *prometheus.CounterVec
 	reqDur, reqSz, resSz *prometheus.HistogramVec
 	router               *echo.Echo
-	listenAddress        string
 	Ppg                  PushGateway
 
-	MetricsList []*Metric
-	MetricsPath string
-	Subsystem   string
-	Skipper     middleware.Skipper
+	metricsList []*Metric
+	metricsPath string
+	subsystem   string
+	skipper     middleware.Skipper
 
-	RequestCounterURLLabelMappingFunc RequestCounterURLLabelMappingFunc
+	requestCounterURLLabelMappingFunc RequestCounterURLLabelMappingFunc
 
 	// Context string to use as a prometheus URL label
-	URLLabelFromContext string
+	urlLabelFromContext string
 }
 
 // PushGateway contains the configuration for pushing to a Prometheus pushgateway (optional)
@@ -144,36 +144,50 @@ type PushGateway struct {
 	Job string
 }
 
-// NewPrometheus generates a new set of metrics with a certain subsystem name
-func NewPrometheus(subsystem string, skipper middleware.Skipper, customMetricsList ...[]*Metric) *Prometheus {
-	var metricsList []*Metric
-	if skipper == nil {
+// Config let you configure how Prometheus works
+type Config struct {
+	MetricsPath     string
+	Subsystem       string
+	Skipper         middleware.Skipper
+	AdditionMetrics []*Metric
+}
+
+// NewPrometheusWithConfig creates a new Prometheus instance with your configuration
+func NewPrometheusWithConfig(config Config) *Prometheus {
+	metricsPath := defaultString(config.MetricsPath, defaultMetricPath)
+	subsystem := defaultString(config.Subsystem, defaultSubsystem)
+
+	var skipper middleware.Skipper
+	if config.Skipper != nil {
+		skipper = config.Skipper
+	} else {
 		skipper = middleware.DefaultSkipper
 	}
 
-	if len(customMetricsList) > 1 {
-		panic("Too many args. NewPrometheus( string, <optional []*Metric> ).")
-	} else if len(customMetricsList) == 1 {
-		metricsList = customMetricsList[0]
-	}
-
+	var metricsList []*Metric = config.AdditionMetrics
 	for _, metric := range standardMetrics {
 		metricsList = append(metricsList, metric)
 	}
 
 	p := &Prometheus{
-		MetricsList: metricsList,
-		MetricsPath: defaultMetricPath,
-		Subsystem:   defaultSubsystem,
-		Skipper:     skipper,
-		RequestCounterURLLabelMappingFunc: func(c echo.Context) string {
+		metricsList: metricsList,
+		metricsPath: metricsPath,
+		subsystem:   subsystem,
+		skipper:     skipper,
+		requestCounterURLLabelMappingFunc: func(c echo.Context) string {
 			return c.Path() // i.e. by default do nothing, i.e. return URL as is
 		},
 	}
-
-	p.registerMetrics(subsystem)
+	p.registerMetrics(config.Subsystem)
 
 	return p
+}
+
+// NewPrometheus creates a new Prometheus instance with default configuration
+func NewPrometheus(subsystem string) *Prometheus {
+	return NewPrometheusWithConfig(Config{
+		Subsystem: subsystem,
+	})
 }
 
 // SetPushGateway sends metrics to a remote pushgateway exposed on pushGatewayURL
@@ -188,40 +202,6 @@ func (p *Prometheus) SetPushGateway(pushGatewayURL, metricsURL string, pushInter
 // SetPushGatewayJob job name, defaults to "echo"
 func (p *Prometheus) SetPushGatewayJob(j string) {
 	p.Ppg.Job = j
-}
-
-// SetListenAddress for exposing metrics on address. If not set, it will be exposed at the
-// same address of the echo engine that is being used
-// func (p *Prometheus) SetListenAddress(address string) {
-// 	p.listenAddress = address
-// 	if p.listenAddress != "" {
-// 		p.router = echo.Echo().Router()
-// 	}
-// }
-
-// SetListenAddressWithRouter for using a separate router to expose metrics. (this keeps things like GET /metrics out of
-// your content's access log).
-// func (p *Prometheus) SetListenAddressWithRouter(listenAddress string, r *echo.Echo) {
-// 	p.listenAddress = listenAddress
-// 	if len(p.listenAddress) > 0 {
-// 		p.router = r
-// 	}
-// }
-
-// SetMetricsPath set metrics paths
-func (p *Prometheus) SetMetricsPath(e *echo.Echo) {
-	if p.listenAddress != "" {
-		p.router.GET(p.MetricsPath, prometheusHandler())
-		p.runServer()
-	} else {
-		e.GET(p.MetricsPath, prometheusHandler())
-	}
-}
-
-func (p *Prometheus) runServer() {
-	if p.listenAddress != "" {
-		go p.router.Start(p.listenAddress)
-	}
 }
 
 func (p *Prometheus) getMetrics() []byte {
@@ -337,8 +317,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 }
 
 func (p *Prometheus) registerMetrics(subsystem string) {
-
-	for _, metricDef := range p.MetricsList {
+	for _, metricDef := range p.metricsList {
 		metric := NewMetric(metricDef, subsystem)
 		if err := prometheus.Register(metric); err != nil {
 			log.Errorf("%s could not be registered in Prometheus: %v", metricDef.Name, err)
@@ -357,19 +336,40 @@ func (p *Prometheus) registerMetrics(subsystem string) {
 	}
 }
 
-// Use adds the middleware to the Echo engine.
-func (p *Prometheus) Use(e *echo.Echo) {
+func (p *Prometheus) Mount(e *echo.Echo) {
 	e.Use(p.HandlerFunc)
-	p.SetMetricsPath(e)
+}
+
+func (p *Prometheus) SetRoute(e *echo.Echo) {
+	e.GET(p.metricsPath, prometheusHandler())
+}
+
+// Embed adds the middleware to the Echo instance and setup the route for exporting
+func (p *Prometheus) Embed(e *echo.Echo) {
+	p.Mount(e)
+	p.SetRoute(e)
+}
+
+// Start start Prometheus in a separate Echo instance, which can be shutdowned with the Context parameter
+func (p *Prometheus) Start(ctx context.Context, e *echo.Echo, listenAddress string) {
+	go func() {
+		p.SetRoute(e)
+		e.Start(listenAddress)
+	}()
+
+	select {
+	case <-ctx.Done():
+		e.Shutdown(context.Background())
+	}
 }
 
 // HandlerFunc defines handler function for middleware
 func (p *Prometheus) HandlerFunc(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) (err error) {
-		if c.Path() == p.MetricsPath {
+		if c.Path() == p.metricsPath {
 			return next(c)
 		}
-		if p.Skipper(c) {
+		if p.skipper(c) {
 			return next(c)
 		}
 
@@ -381,15 +381,15 @@ func (p *Prometheus) HandlerFunc(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 
 		status := strconv.Itoa(c.Response().Status)
-		url := p.RequestCounterURLLabelMappingFunc(c)
+		url := p.requestCounterURLLabelMappingFunc(c)
 
 		elapsed := float64(time.Since(start)) / float64(time.Second)
 		resSz := float64(c.Response().Size)
 
 		p.reqDur.WithLabelValues(status, c.Request().Method, url).Observe(elapsed)
 
-		if len(p.URLLabelFromContext) > 0 {
-			u := c.Get(p.URLLabelFromContext)
+		if len(p.urlLabelFromContext) > 0 {
+			u := c.Get(p.urlLabelFromContext)
 			if u == nil {
 				u = "unknown"
 			}
@@ -434,4 +434,11 @@ func computeApproximateRequestSize(r *http.Request) int {
 		s += int(r.ContentLength)
 	}
 	return s
+}
+
+func defaultString(val string, defaultVal string) string {
+	if val != "" {
+		return val
+	}
+	return defaultVal
 }
