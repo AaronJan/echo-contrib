@@ -1,4 +1,4 @@
-module github.com/labstack/echo-contrib
+module github.com/aaronjan/echo-contrib
 
 require (
 	github.com/appleboy/gofight/v2 v2.1.2
@@ -9,4 +9,4 @@ require (
 	gopkg.in/yaml.v2 v2.2.7 // indirect
 )
 
-go 1.12
+go 1.15
